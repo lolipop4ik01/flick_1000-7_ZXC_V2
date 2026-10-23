@@ -1,0 +1,1253 @@
+--[[
+    ║  Flick To Murderer — MM2 · CORE LOGIC                             ║
+    ║  • Универсальная папка FlickUI для конфига и картинок             ║
+    ║  • Логика наведения, предикта и поиска дула                       ║
+]]
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local CoreGui = game:GetService("CoreGui")
+local HttpService = game:GetService("HttpService")
+local Stats = game:GetService("Stats")
+local Workspace = game:GetService("Workspace")
+local TweenService = game:GetService("TweenService")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- ========== ПУТИ К ПАПКЕ ==========
+local FOLDER = "FlickUI"
+local CONFIG_FILE = FOLDER .. "/config.json"
+local BG_FILE = FOLDER .. "/bg.png"
+local ICON_FILE = FOLDER .. "/icon.png"
+
+local CustomBg = nil
+local CustomIcon = nil
+
+-- Создаем папку, если ее нет
+if makefolder and not isfolder(FOLDER) then
+    pcall(function() makefolder(FOLDER) end)
+end
+
+-- Пытаемся загрузить кастомные ассеты
+if isfile and getcustomasset then
+    pcall(function()
+        if isfile(BG_FILE) then CustomBg = getcustomasset(BG_FILE) end
+        if isfile(ICON_FILE) then CustomIcon = getcustomasset(ICON_FILE) end
+    end)
+end
+
+print("[CORE] Folder: " .. FOLDER)
+print("[CORE] Background: " .. (CustomBg and "LOADED" or "default"))
+print("[CORE] Icon: " .. (CustomIcon and "LOADED" or "default"))
+
+-- ========== КОНФИГ ==========
+local Config = {
+    Enabled = true,
+    Keybind = "X",
+    SilentAim = false,
+    AutoShoot = true,
+    VisualFlick = true,
+    ReturnCamera = true,
+    ReturnDelay = 51,
+    ReturnRandomPxX = 214,
+    ReturnRandomPxY = 79,
+    ReturnRandomDelayMs = 23,
+    ReturnSpeed = 25,
+    NotificationsEnabled = true,
+    EquipGun = true,
+    SelfVelocityComp = true,
+    AimSpeed = 0.60,
+    AimMaxTime = 0.45,
+    AimToleranceDeg = 0.50,
+    AimStableFrames = 1,
+    AimMaxPixels = 804,
+    FinalSnapAngle = 30.0,
+    TargetPart = "HumanoidRootPart",
+    PredictEnabled = true,
+    PredictOp = "Multiply",
+    PredictXZ = 0.1258,
+    PredictY = 0.0444,
+    PingComp = true,
+    VelocitySmooth = true,
+    WallCheck = false,
+    CacheInterval = 0.25,
+    EquipTimeout = 0.30,
+    EnvCheck = true,
+    RaiseOnFall = true,
+    LastVisible = false,
+    WallOffset = 0.40,
+    FallRaise = 2.50,
+    RayCheckRange = 9.0,
+    WallDetectDistance = 3.0,
+    JumpVelocityThreshold = 20,
+    JumpPredictMultiplier = 0.3,
+    MuzzleForward = 2.5,
+    MuzzleUp = 0.5,
+    ForceHandleOffset = false,
+    SensitivityPxPerRad = 0,
+    ReturnJitter = 0.05,
+    UnequipAfterShot = false,
+    UnequipDelayMin = 100,
+    UnequipDelayMax = 500
+}
+
+local function saveConfig()
+    if not writefile then return false end
+    if makefolder and not isfolder(FOLDER) then pcall(function() makefolder(FOLDER) end) end
+    local ok, json = pcall(function() return HttpService:JSONEncode(Config) end)
+    if not ok or not json then return false end
+    return pcall(function() writefile(CONFIG_FILE, json) end)
+end
+
+local function loadConfig()
+    local data
+    if readfile and isfile and isfile(CONFIG_FILE) then
+        local ok, d = pcall(function() return HttpService:JSONDecode(readfile(CONFIG_FILE)) end)
+        if ok and type(d) == "table" then data = d end
+    end
+    -- Миграция старого конфига
+    if not data and readfile and isfile and isfile("flick_mm2_config.json") then
+        local ok, d = pcall(function() return HttpService:JSONDecode(readfile("flick_mm2_config.json")) end)
+        if ok and type(d) == "table" then data = d end
+    end
+    if data then
+        for k, v in pairs(data) do
+            if Config[k] ~= nil then Config[k] = v end
+        end
+    end
+    saveConfig()
+end
+loadConfig()
+
+-- ========== ХЕЛПЕРЫ ==========
+local function getSafeParent()
+    local parent = gethui and gethui()
+    if parent and typeof(parent) == "Instance" then return parent end
+    parent = CoreGui
+    if parent and typeof(parent) == "Instance" then return parent end
+    return LocalPlayer:WaitForChild("PlayerGui")
+end
+
+local function notify(msg, duration)
+    if not Config.NotificationsEnabled then return end
+    duration = duration or 2
+    task.spawn(function()
+        pcall(function()
+            local sg = getSafeParent():FindFirstChild("Flick_Notify")
+            if not sg then
+                sg = Instance.new("ScreenGui")
+                sg.Name = "Flick_Notify"; sg.ResetOnSpawn = false; sg.IgnoreGuiInset = true
+                sg.Parent = getSafeParent()
+            end
+            local frame = Instance.new("Frame")
+            frame.Size = UDim2.new(0, 320, 0, 50); frame.Position = UDim2.new(0.5, -160, 0.8, 0)
+            frame.BackgroundColor3 = Color3.fromRGB(22, 22, 28); frame.BackgroundTransparency = 0.1
+            frame.BorderSizePixel = 0; frame.Parent = sg
+            Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 10)
+            local st = Instance.new("UIStroke", frame)
+            st.Color = Color3.fromRGB(100, 150, 255); st.Transparency = 0.5
+            local label = Instance.new("TextLabel")
+            label.Size = UDim2.new(1, -16, 1, 0); label.Position = UDim2.new(0, 8, 0, 0)
+            label.BackgroundTransparency = 1; label.Text = msg
+            label.TextColor3 = Color3.new(1, 1, 1); label.Font = Enum.Font.GothamMedium
+            label.TextSize = 13; label.TextWrapped = true; label.Parent = frame
+            frame:TweenPosition(UDim2.new(0.5, -160, 0.75, 0), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.3, true)
+            task.wait(duration)
+            frame:TweenPosition(UDim2.new(0.5, -160, 0.85, 0), Enum.EasingDirection.In, Enum.EasingStyle.Quad, 0.3, true)
+            task.wait(0.3); frame:Destroy()
+        end)
+    end)
+end
+
+local function findShootRemote(verbose)
+    local function log(msg) if verbose then print("[CORE] " .. msg) end end
+    local char = LocalPlayer.Character
+    if char then
+        local gun = char:FindFirstChild("Gun")
+        if gun then
+            log("Gun in character")
+            local shoot = gun:FindFirstChild("Shoot")
+            if shoot and shoot:IsA("RemoteEvent") then return shoot end
+            for _, v in ipairs(gun:GetDescendants()) do
+                if v:IsA("RemoteEvent") then log("Fallback: " .. v:GetFullName()) return v end
+            end
+        end
+    end
+    local bp = LocalPlayer:FindFirstChild("Backpack")
+    if bp then
+        local gun = bp:FindFirstChild("Gun")
+        if gun then
+            local shoot = gun:FindFirstChild("Shoot")
+            if shoot and shoot:IsA("RemoteEvent") then return shoot end
+            for _, v in ipairs(gun:GetDescendants()) do
+                if v:IsA("RemoteEvent") then return v end
+            end
+        end
+    end
+    return nil
+end
+
+local function forceEquipGun()
+    local char = LocalPlayer.Character
+    if not char then return false end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum then return false end
+    if char:FindFirstChild("Gun") then return true end
+    local bp = LocalPlayer:FindFirstChild("Backpack")
+    if not bp then return false end
+    local gun = bp:FindFirstChild("Gun")
+    if not gun then return false end
+    pcall(function() hum:EquipTool(gun) end)
+    local deadline = tick() + Config.EquipTimeout
+    while tick() < deadline do
+        if char:FindFirstChild("Gun") then return true end
+        RunService.Heartbeat:Wait()
+    end
+    return char:FindFirstChild("Gun") ~= nil
+end
+
+local function getMuzzlePosition(aimTarget)
+    local char = LocalPlayer.Character
+    if not char then return nil, "no character" end
+    local gun = char:FindFirstChild("Gun")
+    if not gun then return nil, "gun not equipped" end
+    if not Config.ForceHandleOffset then
+        for _, obj in ipairs(gun:GetDescendants()) do
+            if obj:IsA("Attachment") and obj.Name:lower():find("raycast") then
+                return obj.WorldPosition, "RaycastAttachment: " .. obj.Name
+            end
+        end
+    end
+    local handle = gun:FindFirstChild("Handle")
+    if handle and handle:IsA("BasePart") then
+        local fwd = Config.MuzzleForward or 2.5
+        local up = Config.MuzzleUp or 0.5
+        local muzzlePos = handle.Position + handle.CFrame.LookVector * fwd + Vector3.new(0, up, 0)
+        return muzzlePos, string.format("Handle + Fwd:%.1f Up:%.1f", fwd, up)
+    end
+    return nil, "no handle"
+end
+
+-- ========== SENSITIVITY ==========
+local sensitivityPxPerRad = 400
+local sensitivityMeasured = false
+
+local function calibrateSensitivity()
+    if sensitivityMeasured then return end
+    if Config.SensitivityPxPerRad and Config.SensitivityPxPerRad > 0 then
+        sensitivityPxPerRad = Config.SensitivityPxPerRad
+        sensitivityMeasured = true
+        print(string.format("[CORE] Sensitivity from config: %.0f px/rad", sensitivityPxPerRad))
+        return
+    end
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    local ok = pcall(function()
+        local oldBehavior = UserInputService.MouseBehavior
+        if oldBehavior ~= Enum.MouseBehavior.LockCenter then
+            pcall(function() UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter end)
+            RunService.RenderStepped:Wait()
+        end
+        RunService.RenderStepped:Wait()
+        local beforeCF = cam.CFrame
+        local testPx = 10
+        mousemoverel(testPx, 0)
+        RunService.RenderStepped:Wait()
+        RunService.RenderStepped:Wait()
+        local afterCF = cam.CFrame
+        mousemoverel(-testPx, 0)
+        RunService.RenderStepped:Wait()
+        RunService.RenderStepped:Wait()
+        if oldBehavior ~= Enum.MouseBehavior.LockCenter then
+            pcall(function() UserInputService.MouseBehavior = oldBehavior end)
+        end
+        local dot = math.clamp(beforeCF.LookVector:Dot(afterCF.LookVector), -1, 1)
+        local angle = math.acos(dot)
+        if angle > 1e-4 then
+            sensitivityPxPerRad = testPx / angle
+            sensitivityMeasured = true
+            Config.SensitivityPxPerRad = sensitivityPxPerRad
+            saveConfig()
+            print(string.format("[CORE] Sensitivity measured: %.0f px/rad", sensitivityPxPerRad))
+        else
+            local mds = UserInputService.MouseDeltaSensitivity
+            if mds and mds > 0 then sensitivityPxPerRad = 400 / mds end
+            sensitivityMeasured = true
+            Config.SensitivityPxPerRad = sensitivityPxPerRad
+            saveConfig()
+            print(string.format("[CORE] Sensitivity fallback: %.0f px/rad", sensitivityPxPerRad))
+        end
+    end)
+    if not ok then
+        sensitivityPxPerRad = 400
+        sensitivityMeasured = true
+    end
+end
+
+function findMurderer()
+    local byRole, byKnife = nil, nil
+    if game.PlaceId == 142823291 then
+        local ok, roleData = pcall(function()
+            local remote = ReplicatedStorage:FindFirstChild("GetPlayerData", true)
+            if remote and remote:IsA("RemoteFunction") then return remote:InvokeServer() end
+        end)
+        if ok and type(roleData) == "table" then
+            for playerName, data in pairs(roleData) do
+                if type(data) == "table" and (data.Role == "Murderer" or data.RoleId == 1) and not data.Killed and not data.Dead then
+                    local p = Players:FindFirstChild(playerName)
+                    if p and p.Character then byRole = p break end
+                end
+            end
+        end
+    end
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character then
+            local char = player.Character
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health > 0 then
+                local bp = player:FindFirstChild("Backpack")
+                if (bp and bp:FindFirstChild("Knife")) or char:FindFirstChild("Knife") then
+                    byKnife = player break
+                end
+            end
+        end
+    end
+    return byRole or byKnife
+end
+
+local cachedMurderer = nil
+getgenv().FlickRunning = true
+task.spawn(function()
+    while getgenv().FlickRunning do
+        task.wait(Config.CacheInterval)
+        if not getgenv().FlickRunning then break end
+        local ok, result = pcall(findMurderer)
+        cachedMurderer = ok and result or nil
+    end
+end)
+
+local function getPing()
+    local ok, p = pcall(function() return Stats.Network.ServerStatsItem["Data Ping"]:GetValue() end)
+    return ok and (p / 1000) or 0
+end
+
+local velocityCache = {}
+local function getSmoothedVelocity(part)
+    if not Config.VelocitySmooth then return part.AssemblyLinearVelocity end
+    local now = tick()
+    local key = tostring(part)
+    if not velocityCache[key] then velocityCache[key] = {} end
+    local cache = velocityCache[key]
+    table.insert(cache, {v = part.AssemblyLinearVelocity, t = now})
+    while #cache > 0 and now - cache[1].t > 0.1 do table.remove(cache, 1) end
+    local avg = Vector3.zero
+    for _, e in ipairs(cache) do avg = avg + e.v end
+    if #cache > 0 then avg = avg / #cache end
+    return avg
+end
+
+local function getPredictedPosition(part)
+    if not part or not Config.PredictEnabled then return part.Position end
+    local vel = getSmoothedVelocity(part)
+    if not vel then return part.Position end
+    local mxz, my = Config.PredictXZ, part.Name == "HumanoidRootPart" and 0 or Config.PredictY
+    if Config.PredictOp == "Divide" then
+        if mxz > 0 then mxz = 1 / mxz else mxz = 0 end
+        if my > 0 then my = 1 / my else my = 0 end
+    end
+    local offset = Vector3.new(vel.X * mxz, vel.Y * my, vel.Z * mxz)
+    if Config.PingComp then
+        local po = vel * (getPing() * 0.5)
+        if part.Name == "HumanoidRootPart" then po = Vector3.new(po.X, 0, po.Z) end
+        offset = offset + po
+    end
+    return part.Position + offset
+end
+
+local function getAngularDelta(cam, targetPos)
+    local camPos = cam.CFrame.Position
+    local delta = targetPos - camPos
+    if delta.Magnitude < 0.1 then return 0, 0 end
+    local localDir = cam.CFrame:VectorToObjectSpace(delta.Unit)
+    local yaw = math.atan2(localDir.X, -localDir.Z)
+    local pitch = math.atan2(localDir.Y, math.sqrt(localDir.X * localDir.X + localDir.Z * localDir.Z))
+    return yaw, pitch
+end
+
+local function adjustTargetForEnvironment(shootOrigin, targetPos, murdererChar)
+    if not Config.EnvCheck then return targetPos, false end
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    local filter = {}
+    if LocalPlayer.Character then table.insert(filter, LocalPlayer.Character) end
+    if murdererChar then table.insert(filter, murdererChar) end
+    params.FilterDescendantsInstances = filter
+    local result = targetPos
+    local adjusted = false
+    if Config.LastVisible then
+        local dir = targetPos - shootOrigin
+        if dir.Magnitude > 0.5 then
+            local ray = workspace:Raycast(shootOrigin, dir, params)
+            if ray then
+                result = shootOrigin + dir.Unit * math.max(0.5, ray.Distance - Config.WallOffset)
+                adjusted = true
+            end
+        end
+    end
+    if Config.RaiseOnFall then
+        local downRay = workspace:Raycast(result, Vector3.new(0, -Config.RayCheckRange, 0), params)
+        if downRay and downRay.Distance < 2.5 then
+            result = result + Vector3.new(0, math.max(Config.FallRaise, 2.5 - downRay.Distance), 0)
+            adjusted = true
+        end
+    end
+    return result, adjusted
+end
+
+local function applySelfVelocityComp(pos)
+    if not Config.SelfVelocityComp then return pos end
+    local myChar = LocalPlayer.Character
+    local myHrp = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    if not myHrp then return pos end
+    local myVel = myHrp.AssemblyLinearVelocity
+    if myVel.Magnitude < 0.1 then return pos end
+    return pos + myVel * (getPing() * 0.5)
+end
+
+local function smoothReturn(accumX, accumY)
+    if not Config.ReturnCamera then return end
+    if accumX == 0 and accumY == 0 then return end
+
+    local baseDelay = Config.ReturnDelay + math.random(0, Config.ReturnRandomDelayMs)
+    if baseDelay > 0 then task.wait(baseDelay / 1000) end
+
+    -- направление и дистанция фиксированы ОДИН раз
+    local randX = math.random(-Config.ReturnRandomPxX, Config.ReturnRandomPxX)
+    local randY = math.random(-Config.ReturnRandomPxY, Config.ReturnRandomPxY)
+    local targetX = -accumX + randX
+    local targetY = -accumY + randY
+    local dist = math.sqrt(targetX * targetX + targetY * targetY)
+    if dist < 1 then return end
+
+    -- N кадров на весь возврат: ReturnSpeed 25 -> 16 кадров, 40 -> 10, 120 -> 3
+    local N = math.clamp(math.floor(400 / math.max(Config.ReturnSpeed, 3)), 3, 120)
+    local stepX0 = targetX / N
+    local stepY0 = targetY / N
+
+    local jitter = math.clamp(Config.ReturnJitter or 0.15, 0, 1)
+    local jitterPx = jitter * 0.8  -- ±0.8px шума на кадр при максимуме
+
+    local cx, cy = 0, 0
+    for i = 1, N do
+        if not getgenv().FlickRunning then break end
+
+        local stepX, stepY
+        if i == N then
+            -- последний кадр — точное закрытие, без накопленного шума
+            stepX = targetX - cx
+            stepY = targetY - cy
+        else
+            stepX = stepX0
+            stepY = stepY0
+            if jitterPx > 0.01 then
+                stepX = stepX + (math.random() * 2 - 1) * jitterPx
+                stepY = stepY + (math.random() * 2 - 1) * jitterPx
+            end
+        end
+
+        mousemoverel(stepX, stepY)
+        cx = cx + stepX
+        cy = cy + stepY
+        RunService.RenderStepped:Wait()
+    end
+end
+
+local isFlicking = false
+
+local function aimLoop(getTargetPos)
+    local cam = workspace.CurrentCamera
+    local pxPerRad = (sensitivityPxPerRad > 0) and sensitivityPxPerRad or 400
+    local accumX, accumY = 0, 0
+    local tolerance = math.rad(Config.AimToleranceDeg)
+
+    local lockedTarget = getTargetPos()
+    if not lockedTarget then return accumX, accumY, nil, false end
+
+    local yaw0, pitch0 = getAngularDelta(cam, lockedTarget)
+    local initialAngle = math.sqrt(yaw0 * yaw0 + pitch0 * pitch0)
+    if initialAngle < tolerance then return accumX, accumY, lockedTarget, true end
+
+    -- N кадров на весь флик. AimSpeed 1.0 -> 8 кадров, 0.6 -> 13, 0.3 -> 26
+    local N = math.clamp(math.floor(8 / math.max(Config.AimSpeed, 0.05)), 3, 120)
+    local perFrameAngle = initialAngle / N
+
+    for i = 1, N + 4 do
+        if not getgenv().FlickRunning then break end
+
+        local fresh = getTargetPos()
+        if fresh then lockedTarget = fresh end
+
+        local yaw, pitch = getAngularDelta(cam, lockedTarget)
+        local angle = math.sqrt(yaw * yaw + pitch * pitch)
+        if angle < tolerance then
+            return accumX, accumY, lockedTarget, true
+        end
+
+        -- шаг: ровно perFrameAngle, но не больше остатка
+        local stepAngle = math.min(perFrameAngle, angle)
+        local scale = stepAngle / angle
+
+        local dx = yaw * pxPerRad * scale
+        local dy = -pitch * pxPerRad * scale
+        local mag = math.sqrt(dx * dx + dy * dy)
+        if mag > Config.AimMaxPixels then
+            local k = Config.AimMaxPixels / mag
+            dx, dy = dx * k, dy * k
+        end
+        mousemoverel(dx, dy)
+        accumX = accumX + dx
+        accumY = accumY + dy
+        RunService.RenderStepped:Wait()
+    end
+
+    return accumX, accumY, lockedTarget, true
+end
+
+local function scheduleUnequip()
+    if not Config.UnequipAfterShot then return end
+    task.spawn(function()
+        local lo = math.min(Config.UnequipDelayMin, Config.UnequipDelayMax)
+        local hi = math.max(Config.UnequipDelayMin, Config.UnequipDelayMax)
+        local delay = math.random(lo, hi) / 1000
+        task.wait(delay)
+        local char = LocalPlayer.Character
+        if not char then return end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if not hum then return end
+        pcall(function() hum:UnequipTools() end)
+    end)
+end
+
+function flickToMurderer()
+    if not Config.Enabled or isFlicking then return end
+    isFlicking = true
+    local murderer = cachedMurderer or findMurderer()
+    if not murderer then isFlicking = false return end
+    local cam = workspace.CurrentCamera
+    local char = LocalPlayer.Character
+    if not char then isFlicking = false return end
+    local hasGun = forceEquipGun()
+    if hasGun then task.wait(0.05) end
+    
+    local function getTargetPos()
+        if not murderer or not murderer.Character then return nil end
+        local hum = murderer.Character:FindFirstChildOfClass("Humanoid")
+        if not hum or hum.Health <= 0 then return nil end
+        local tp = murderer.Character:FindFirstChild(Config.TargetPart) or murderer.Character:FindFirstChild("HumanoidRootPart")
+        if not tp then return nil end
+        return getPredictedPosition(tp)
+    end
+    
+    local initialPos = getTargetPos()
+    if not initialPos then isFlicking = false return end
+    local remote = hasGun and findShootRemote(false) or nil
+    if hasGun and not remote then print("[CORE] No Shoot remote") isFlicking = false return end
+
+    if not Config.VisualFlick then
+        if not hasGun then isFlicking = false return end
+        local muzzlePos, muzzleSource = getMuzzlePosition(initialPos)
+        if not muzzlePos then isFlicking = false return end
+        local freshTarget = getTargetPos() or initialPos
+        freshTarget = adjustTargetForEnvironment(muzzlePos, freshTarget, murderer.Character)
+        freshTarget = applySelfVelocityComp(freshTarget)
+        local muzzleFinal = getMuzzlePosition(freshTarget) or muzzlePos
+        local A_1 = CFrame.lookAt(muzzleFinal, freshTarget)
+        local A_2 = CFrame.new(freshTarget)
+        if Config.AutoShoot then pcall(function() remote:FireServer(A_1, A_2) end) end
+        isFlicking = false
+        return
+    end
+
+    if not sensitivityMeasured then calibrateSensitivity() end
+    local accumX, accumY, lockedTarget, converged = aimLoop(getTargetPos)
+    if not converged or not lockedTarget then smoothReturn(accumX, accumY) isFlicking = false return end
+    local freshTarget = getTargetPos() or lockedTarget
+    freshTarget = adjustTargetForEnvironment(cam.CFrame.Position, freshTarget, murderer.Character)
+    freshTarget = applySelfVelocityComp(freshTarget)
+    local snapYaw, snapPitch = getAngularDelta(cam, freshTarget)
+    local snapAngleDeg = math.deg(math.sqrt(snapYaw * snapYaw + snapPitch * snapPitch))
+    if snapAngleDeg > 0.05 and snapAngleDeg < Config.FinalSnapAngle then
+        local pxPerRad = (sensitivityPxPerRad > 0) and sensitivityPxPerRad or 400
+        local sdx = snapYaw * pxPerRad
+        local sdy = -snapPitch * pxPerRad
+        mousemoverel(sdx, sdy)
+        accumX = accumX + sdx
+        accumY = accumY + sdy
+        RunService.RenderStepped:Wait()
+    end
+    if hasGun and remote then
+        local muzzlePos = getMuzzlePosition(freshTarget)
+        if not muzzlePos then muzzlePos = cam.CFrame.Position end
+        local A_1 = CFrame.lookAt(muzzlePos, freshTarget)
+        local A_2 = CFrame.new(freshTarget)
+        if Config.AutoShoot then pcall(function() remote:FireServer(A_1, A_2) end) end
+        scheduleUnequip()
+    end
+    smoothReturn(accumX, accumY)
+    isFlicking = false
+end
+
+function testFire()
+    local murderer = cachedMurderer or findMurderer()
+    if not murderer or not murderer.Character then print("[CORE] TEST: No murderer") return end
+    local char = LocalPlayer.Character
+    if not char then return end
+    if not forceEquipGun() then print("[CORE] TEST: cannot equip gun") return end
+    task.wait(0.05)
+    local remote = findShootRemote(false)
+    if not remote then print("[CORE] TEST: No remote") return end
+    local tp = murderer.Character:FindFirstChild("HumanoidRootPart")
+    if not tp then return end
+    local targetPos = getPredictedPosition(tp)
+    local muzzlePos, muzzleSource = getMuzzlePosition(targetPos)
+    if not muzzlePos then print("[CORE] TEST: no muzzle") return end
+    local A_1 = CFrame.lookAt(muzzlePos, targetPos)
+    local A_2 = CFrame.new(targetPos)
+    print(string.format("[CORE] TEST FIRE: origin=(%.1f,%.1f,%.1f) from=%s", muzzlePos.X, muzzlePos.Y, muzzlePos.Z, muzzleSource))
+    pcall(function() remote:FireServer(A_1, A_2) end)
+    scheduleUnequip()
+end
+
+local waitingForBind = false
+local bindBtnRef
+local function setupKeybind()
+    if getgenv().FlickKeybindConn then pcall(function() getgenv().FlickKeybindConn:Disconnect() end) end
+    getgenv().FlickKeybindConn = UserInputService.InputBegan:Connect(function(input, gp)
+        if gp then return end
+        if waitingForBind then
+            waitingForBind = false
+            if input.KeyCode ~= Enum.KeyCode.Unknown then
+                Config.Keybind = input.KeyCode.Name
+                saveConfig()
+                if bindBtnRef then bindBtnRef.Text = "⌨️ BIND: " .. Config.Keybind end
+            end
+            return
+        end
+        if input.KeyCode == Enum.KeyCode[Config.Keybind] then task.spawn(flickToMurderer) end
+    end)
+end
+
+local MainGui, MainFrame, CircleButton = nil, nil, nil
+
+local function fullUnload()
+    getgenv().FlickRunning = false
+    if getgenv().FlickKeybindConn then
+        pcall(function() getgenv().FlickKeybindConn:Disconnect() end)
+        getgenv().FlickKeybindConn = nil
+    end
+    pcall(function() if MainGui then MainGui:Destroy() end end)
+    pcall(function()
+        local notif = getSafeParent():FindFirstChild("Flick_Notify")
+        if notif then notif:Destroy() end
+    end)
+    MainGui, MainFrame, CircleButton, bindBtnRef = nil, nil, nil, nil
+    getgenv().FlickCleanup = nil
+    getgenv().FlickLoaded = nil
+    getgenv().Flick = nil
+    print("[CORE] Fully unloaded.")
+end
+local function createMainGUI()
+    local TweenService = game:GetService("TweenService")
+    local UserInputService = game:GetService("UserInputService")
+    local Players = game:GetService("Players")
+
+    -- ═════════ ПАЛИТРА (БЕЗ fromHex, ТОЛЬКО fromRGB) ═════════
+    local C = {
+        bg      = Color3.fromRGB(10, 10, 10),
+        bg2     = Color3.fromRGB(21, 21, 21),
+        bg3     = Color3.fromRGB(30, 30, 30),
+        hover   = Color3.fromRGB(42, 42, 42),
+        stroke  = Color3.fromRGB(51, 51, 51),
+        accent  = Color3.fromRGB(224, 224, 224),
+        text    = Color3.fromRGB(255, 255, 255),
+        sub     = Color3.fromRGB(136, 136, 136),
+        off     = Color3.fromRGB(42, 42, 42),
+    }
+    local TI = TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+    local FONT_B = Enum.Font.GothamBold
+    local FONT_M = Enum.Font.GothamMedium
+
+    local function tween(obj, props) TweenService:Create(obj, TI, props):Play() end
+    local function addStroke(parent)
+        local s = Instance.new("UIStroke")
+        s.Color = C.stroke; s.Transparency = 0.5; s.Thickness = 1
+        s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+        s.Parent = parent
+        return s
+    end
+    local function addCorner(parent, r)
+        local c = Instance.new("UICorner"); c.CornerRadius = r or UDim.new(0, 6); c.Parent = parent; return c
+    end
+    local function newLabel(parent, text, font, size, color, align)
+        local l = Instance.new("TextLabel")
+        l.BackgroundTransparency = 1; l.Text = text; l.Font = font
+        l.TextSize = size; l.TextColor3 = color
+        l.TextXAlignment = align or Enum.TextXAlignment.Left
+        l.Parent = parent
+        return l
+    end
+
+    local function DragSystem(handle, target)
+        local dragging, dragStart, startPos, moved = false, nil, nil, false
+        handle.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                dragging, moved = true, false
+                dragStart = input.Position
+                startPos = target.Position
+            end
+        end)
+        UserInputService.InputChanged:Connect(function(input)
+            if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+                local d = input.Position - dragStart
+                if d.Magnitude > 4 then moved = true end
+                target.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+            end
+        end)
+        UserInputService.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                dragging = false
+            end
+        end)
+        return function() return moved end
+    end
+
+    -- ═════════ ROOT ═════════
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "DeadInsideGUI"
+    gui.ResetOnSpawn = false
+    gui.IgnoreGuiInset = true
+    gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    gui.DisplayOrder = 999
+    local okParent = pcall(function() gui.Parent = (gethui and gethui()) or game:GetService("CoreGui") end)
+    if not okParent or not gui.Parent then gui.Parent = Players.LocalPlayer:WaitForChild("PlayerGui") end
+
+    -- ═════════ ГЛАВНОЕ ОКНО ═════════
+    local main = Instance.new("Frame")
+    main.Name = "Main"
+    main.Size = UDim2.fromOffset(380, 520)
+    main.Position = UDim2.new(0.5, -190, 0.5, -260)
+    main.BackgroundColor3 = C.bg
+    main.BorderSizePixel = 0
+    main.ClipsDescendants = true
+    main.Visible = false
+    main.Parent = gui
+    addCorner(main, UDim.new(0, 10))
+    addStroke(main)
+
+    local hasBg = (CustomBg ~= nil and CustomBg ~= "")
+    if hasBg then
+        local bgImg = Instance.new("ImageLabel")
+        bgImg.Size = UDim2.fromScale(1, 1)
+        bgImg.BackgroundTransparency = 1
+        bgImg.Image = CustomBg
+        bgImg.ScaleType = Enum.ScaleType.Crop
+        bgImg.ZIndex = 1
+        bgImg.Parent = main
+        addCorner(bgImg, UDim.new(0, 10))
+
+        local overlay = Instance.new("Frame")
+        overlay.Size = UDim2.fromScale(1, 1)
+        overlay.BackgroundColor3 = Color3.new(0, 0, 0)
+        overlay.BorderSizePixel = 0
+        overlay.ZIndex = 2
+        overlay.Parent = main
+        addCorner(overlay, UDim.new(0, 10))
+        local grad = Instance.new("UIGradient")
+        grad.Rotation = 90
+        grad.Transparency = NumberSequence.new({
+            NumberSequenceKeypoint.new(0, 0.4),
+            NumberSequenceKeypoint.new(1, 0.85),
+        })
+        grad.Parent = overlay
+    end
+
+    local header = Instance.new("Frame")
+    header.Size = UDim2.new(1, 0, 0, 44)
+    header.BackgroundColor3 = C.bg2
+    header.BackgroundTransparency = hasBg and 0.25 or 0
+    header.BorderSizePixel = 0
+    header.ZIndex = 3
+    header.Parent = main
+
+    local headerLine = Instance.new("Frame")
+    headerLine.Size = UDim2.new(1, 0, 0, 1)
+    headerLine.Position = UDim2.new(0, 0, 1, -1)
+    headerLine.BackgroundColor3 = C.stroke
+    headerLine.BackgroundTransparency = 0.5
+    headerLine.BorderSizePixel = 0
+    headerLine.ZIndex = 4
+    headerLine.Parent = header
+
+    local title = newLabel(header, "DEAD INSIDE", FONT_B, 15, C.text)
+    title.Size = UDim2.new(1, -70, 1, 0)
+    title.Position = UDim2.fromOffset(16, 0)
+    title.ZIndex = 4
+
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.Size = UDim2.fromOffset(28, 28)
+    closeBtn.Position = UDim2.new(1, -38, 0.5, -14)
+    closeBtn.BackgroundColor3 = C.bg3
+    closeBtn.AutoButtonColor = false
+    closeBtn.Text = "×"
+    closeBtn.Font = FONT_B
+    closeBtn.TextSize = 16
+    closeBtn.TextColor3 = C.text
+    closeBtn.ZIndex = 5
+    closeBtn.Parent = header
+    addCorner(closeBtn, UDim.new(0, 6))
+    addStroke(closeBtn)
+    closeBtn.MouseEnter:Connect(function() tween(closeBtn, {BackgroundColor3 = C.hover}) end)
+    closeBtn.MouseLeave:Connect(function() tween(closeBtn, {BackgroundColor3 = C.bg3}) end)
+
+    DragSystem(header, main)
+
+    local scroll = Instance.new("ScrollingFrame")
+    scroll.Size = UDim2.new(1, -16, 1, -56)
+    scroll.Position = UDim2.fromOffset(8, 50)
+    scroll.BackgroundTransparency = 1
+    scroll.BorderSizePixel = 0
+    scroll.ScrollBarThickness = 3
+    scroll.ScrollBarImageColor3 = C.accent
+    scroll.CanvasSize = UDim2.new()
+    scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    scroll.ZIndex = 3
+    scroll.Parent = main
+
+    local list = Instance.new("UIListLayout")
+    list.Padding = UDim.new(0, 6)
+    list.SortOrder = Enum.SortOrder.LayoutOrder
+    list.Parent = scroll
+
+    local pad = Instance.new("UIPadding")
+    pad.PaddingTop = UDim.new(0, 4)
+    pad.PaddingBottom = UDim.new(0, 8)
+    pad.PaddingRight = UDim.new(0, 6)
+    pad.Parent = scroll
+
+    local order = 0
+    local function nextOrder() order += 1 return order end
+
+    local function newRow(height)
+        local row = Instance.new("Frame")
+        row.Size = UDim2.new(1, 0, 0, height)
+        row.BackgroundColor3 = C.bg2
+        row.BackgroundTransparency = hasBg and 0.2 or 0
+        row.BorderSizePixel = 0
+        row.LayoutOrder = nextOrder()
+        row.ZIndex = 4
+        row.Parent = scroll
+        addCorner(row, UDim.new(0, 6))
+        addStroke(row)
+        return row
+    end
+
+    -- ═════════ ЭЛЕМЕНТЫ ═════════
+    local function addSection(text)
+        local l = newLabel(scroll, string.upper(text), FONT_B, 11, C.sub)
+        l.Size = UDim2.new(1, 0, 0, 22)
+        l.LayoutOrder = nextOrder()
+        l.ZIndex = 4
+        local p = Instance.new("UIPadding")
+        p.PaddingLeft = UDim.new(0, 4)
+        p.PaddingTop = UDim.new(0, 6)
+        p.Parent = l
+    end
+
+    local function addToggle(name, key)
+        if Config[key] == nil then Config[key] = false end
+        local row = newRow(38)
+        local lbl = newLabel(row, name, FONT_M, 13, C.text)
+        lbl.Size = UDim2.new(1, -70, 1, 0)
+        lbl.Position = UDim2.fromOffset(12, 0)
+        lbl.ZIndex = 5
+
+        local track = Instance.new("TextButton")
+        track.Size = UDim2.fromOffset(40, 20)
+        track.Position = UDim2.new(1, -52, 0.5, -10)
+        track.AutoButtonColor = false
+        track.Text = ""
+        track.BorderSizePixel = 0
+        track.ZIndex = 5
+        track.Parent = row
+        addCorner(track, UDim.new(1, 0))
+        addStroke(track)
+
+        local knob = Instance.new("Frame")
+        knob.Size = UDim2.fromOffset(14, 14)
+        knob.BorderSizePixel = 0
+        knob.ZIndex = 6
+        knob.Parent = track
+        addCorner(knob, UDim.new(1, 0))
+
+        local function render(animate)
+            local on = Config[key]
+            local trackColor = on and C.accent or C.off
+            local knobColor = on and C.bg or C.sub
+            local knobPos = on and UDim2.new(1, -17, 0.5, -7) or UDim2.new(0, 3, 0.5, -7)
+            if animate then
+                tween(track, {BackgroundColor3 = trackColor})
+                tween(knob, {BackgroundColor3 = knobColor, Position = knobPos})
+            else
+                track.BackgroundColor3 = trackColor
+                knob.BackgroundColor3 = knobColor
+                knob.Position = knobPos
+            end
+        end
+        render(false)
+
+        track.MouseButton1Click:Connect(function()
+            Config[key] = not Config[key]
+            render(true)
+            saveConfig()
+        end)
+    end
+
+    local function addSlider(name, key, min, max, decimals)
+        decimals = decimals or 0
+        local defaultVal = min
+        if Config[key] == nil then Config[key] = defaultVal end
+        Config[key] = tonumber(Config[key]) or defaultVal -- Защита от текста в конфиге
+        local mult = 10 ^ decimals
+        local row = newRow(52)
+
+        local lbl = newLabel(row, name, FONT_M, 13, C.text)
+        lbl.Size = UDim2.new(1, -80, 0, 22)
+        lbl.Position = UDim2.fromOffset(12, 4)
+        lbl.ZIndex = 5
+
+        local valLbl = newLabel(row, "", FONT_M, 12, C.sub, Enum.TextXAlignment.Right)
+        valLbl.Size = UDim2.fromOffset(60, 22)
+        valLbl.Position = UDim2.new(1, -72, 0, 4)
+        valLbl.ZIndex = 5
+
+        local bar = Instance.new("Frame")
+        bar.Size = UDim2.new(1, -24, 0, 4)
+        bar.Position = UDim2.new(0, 12, 0, 36)
+        bar.BackgroundColor3 = C.bg3
+        bar.BorderSizePixel = 0
+        bar.ZIndex = 5
+        bar.Parent = row
+        addCorner(bar, UDim.new(1, 0))
+        addStroke(bar)
+
+        local fill = Instance.new("Frame")
+        fill.Size = UDim2.fromScale(0, 1)
+        fill.BackgroundColor3 = C.accent
+        fill.BorderSizePixel = 0
+        fill.ZIndex = 6
+        fill.Parent = bar
+        addCorner(fill, UDim.new(1, 0))
+
+        local knob = Instance.new("Frame")
+        knob.Size = UDim2.fromOffset(12, 12)
+        knob.AnchorPoint = Vector2.new(0.5, 0.5)
+        knob.Position = UDim2.fromScale(0, 0.5)
+        knob.BackgroundColor3 = C.text
+        knob.BorderSizePixel = 0
+        knob.ZIndex = 7
+        knob.Parent = bar
+        addCorner(knob, UDim.new(1, 0))
+        addStroke(knob)
+
+        local hit = Instance.new("TextButton")
+        hit.Size = UDim2.new(1, 0, 0, 24)
+        hit.Position = UDim2.new(0, 0, 0, 26)
+        hit.BackgroundTransparency = 1
+        hit.Text = ""
+        hit.ZIndex = 8
+        hit.Parent = row
+
+        local function setValue(v, animate)
+            v = math.clamp(math.floor(v * mult + 0.5) / mult, min, max)
+            Config[key] = v
+            local a = (v - min) / (max - min)
+            valLbl.Text = tostring(v)
+            if animate then
+                tween(fill, {Size = UDim2.fromScale(a, 1)})
+                tween(knob, {Position = UDim2.fromScale(a, 0.5)})
+            else
+                fill.Size = UDim2.fromScale(a, 1)
+                knob.Position = UDim2.fromScale(a, 0.5)
+            end
+        end
+        setValue(Config[key], false)
+
+        local dragging = false
+        local function fromInput(input)
+            local a = math.clamp((input.Position.X - bar.AbsolutePosition.X) / bar.AbsoluteSize.X, 0, 1)
+            setValue(min + (max - min) * a, true)
+        end
+        hit.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                dragging = true
+                tween(knob, {Size = UDim2.fromOffset(15, 15)})
+                fromInput(input)
+            end
+        end)
+        UserInputService.InputChanged:Connect(function(input)
+            if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+                fromInput(input)
+            end
+        end)
+        UserInputService.InputEnded:Connect(function(input)
+            if dragging and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
+                dragging = false
+                tween(knob, {Size = UDim2.fromOffset(12, 12)})
+                saveConfig()
+            end
+        end)
+    end
+
+    local function addBtn(name, callback)
+        local btn = Instance.new("TextButton")
+        btn.Size = UDim2.new(1, 0, 0, 36)
+        btn.BackgroundColor3 = C.bg3
+        btn.AutoButtonColor = false
+        btn.Text = name
+        btn.Font = FONT_M
+        btn.TextSize = 13
+        btn.TextColor3 = C.text
+        btn.BorderSizePixel = 0
+        btn.LayoutOrder = nextOrder()
+        btn.ZIndex = 4
+        btn.Parent = scroll
+        addCorner(btn, UDim.new(0, 6))
+        addStroke(btn)
+
+        btn.MouseEnter:Connect(function() tween(btn, {BackgroundColor3 = C.hover}) end)
+        btn.MouseLeave:Connect(function() tween(btn, {BackgroundColor3 = C.bg3}) end)
+        btn.MouseButton1Click:Connect(function() if callback then task.spawn(callback) end end)
+        return btn
+    end
+
+    local function addDropdown(name, key, options)
+        if Config[key] == nil then Config[key] = options[1] end
+        local HEAD, ITEM = 38, 28
+        local row = newRow(HEAD)
+        row.ClipsDescendants = true
+
+        local lbl = newLabel(row, name, FONT_M, 13, C.text)
+        lbl.Size = UDim2.new(0.5, -12, 0, HEAD)
+        lbl.Position = UDim2.fromOffset(12, 0)
+        lbl.ZIndex = 5
+
+        local head = Instance.new("TextButton")
+        head.Size = UDim2.new(0.5, -12, 0, 26)
+        head.Position = UDim2.new(0.5, 0, 0, 6)
+        head.BackgroundColor3 = C.bg3
+        head.AutoButtonColor = false
+        head.Text = tostring(Config[key]) .. "  ▾"
+        head.Font = FONT_M
+        head.TextSize = 12
+        head.TextColor3 = C.text
+        head.BorderSizePixel = 0
+        head.ZIndex = 5
+        head.Parent = row
+        addCorner(head, UDim.new(0, 5))
+        addStroke(head)
+
+        local holder = Instance.new("Frame")
+        holder.Size = UDim2.new(1, -16, 0, #options * ITEM)
+        holder.Position = UDim2.fromOffset(8, HEAD + 2)
+        holder.BackgroundTransparency = 1
+        holder.ZIndex = 5
+        holder.Parent = row
+        Instance.new("UIListLayout", holder)
+
+        local open = false
+        local items = {}
+        local function refresh()
+            for opt, b in pairs(items) do
+                b.TextColor3 = (opt == Config[key]) and C.text or C.sub
+                b.Font = (opt == Config[key]) and FONT_B or FONT_M
+            end
+        end
+
+        for _, opt in ipairs(options) do
+            local b = Instance.new("TextButton")
+            b.Size = UDim2.new(1, 0, 0, ITEM)
+            b.BackgroundColor3 = C.bg3
+            b.BackgroundTransparency = 1
+            b.AutoButtonColor = false
+            b.Text = tostring(opt)
+            b.Font = FONT_M
+            b.TextSize = 12
+            b.TextColor3 = C.sub
+            b.BorderSizePixel = 0
+            b.ZIndex = 6
+            b.Parent = holder
+            addCorner(b, UDim.new(0, 5))
+            items[opt] = b
+            b.MouseEnter:Connect(function() tween(b, {BackgroundTransparency = 0, BackgroundColor3 = C.hover}) end)
+            b.MouseLeave:Connect(function() tween(b, {BackgroundTransparency = 1}) end)
+            b.MouseButton1Click:Connect(function()
+                Config[key] = opt
+                head.Text = tostring(opt) .. "  ▾"
+                refresh()
+                open = false
+                tween(row, {Size = UDim2.new(1, 0, 0, HEAD)})
+                saveConfig()
+            end)
+        end
+        refresh()
+
+        head.MouseButton1Click:Connect(function()
+            open = not open
+            tween(row, {Size = UDim2.new(1, 0, 0, open and (HEAD + #options * ITEM + 10) or HEAD)})
+        end)
+    end
+
+    -- ═════════ ЭЛЕМЕНТЫ МЕНЮ ═════════
+    addSection("Mode")
+    addToggle("VISUAL FLICK", "VisualFlick")
+    addToggle("SILENT AIM", "SilentAim")
+    addToggle("FLICK", "Enabled")
+    addToggle("AUTO SHOOT", "AutoShoot")
+
+    addSection("Aim")
+    addSlider("AIM SPEED", "AimSpeed", 0.05, 1.0, 2)
+    addSlider("AIM MAX TIME", "AimMaxTime", 0.1, 5.0, 2)
+    addSlider("TOLERANCE", "AimToleranceDeg", 0.01, 2.0, 2)
+    addSlider("STABLE FRAMES", "AimStableFrames", 1, 10, 0)
+    addSlider("MAX PIX/FRAME", "AimMaxPixels", 100, 1500, 0)
+    addSlider("FINAL SNAP", "FinalSnapAngle", 0.5, 30.0, 1)
+
+    addSection("Return")
+    addToggle("AUTO RETURN", "ReturnCamera")
+    addSlider("RETURN SPEED", "ReturnSpeed", 6, 120, 0)
+    addSlider("BASE DELAY", "ReturnDelay", 0, 2000, 0)
+    addSlider("RANDOM DELAY", "ReturnRandomDelayMs", 0, 500, 0)
+    addSlider("RANDOM X", "ReturnRandomPxX", 0, 1500, 0)
+    addSlider("RANDOM Y", "ReturnRandomPxY", 0, 1500, 0)
+    addSlider("JITTER", "ReturnJitter", 0, 1, 2)
+
+    addSection("Target")
+    addDropdown("TARGET PART", "TargetPart", {"HumanoidRootPart", "Head", "UpperTorso", "LowerTorso", "LeftArm", "RightArm", "LeftLeg", "RightLeg"})
+    addToggle("SELF VEL COMP", "SelfVelocityComp")
+
+    addSection("Predict")
+    addToggle("AIM PREDICT", "PredictEnabled")
+    addToggle("PING COMP", "PingComp")
+    addToggle("VELOCITY SMOOTH", "VelocitySmooth")
+    addSlider("PREDICT X/Z", "PredictXZ", 0.0001, 1.0, 4)
+    addSlider("PREDICT Y", "PredictY", 0.0001, 0.5, 4)
+    addSlider("JUMP THRESHOLD", "JumpVelocityThreshold", 10, 50, 0)
+    addSlider("JUMP MULT", "JumpPredictMultiplier", 0.3, 1.0, 2)
+
+    addSection("Environment")
+    addToggle("ENV CHECK", "EnvCheck")
+    addToggle("LAST VISIBLE", "LastVisible")
+    addToggle("RAISE ON FALL", "RaiseOnFall")
+    addSlider("WALL OFFSET", "WallOffset", 0.1, 3.0, 2)
+    addSlider("FALL RAISE", "FallRaise", 0.5, 6.0, 2)
+    addSlider("RAY RANGE", "RayCheckRange", 2.0, 15.0, 1)
+    addSection("Unequip")
+    addToggle("UNEQUIP AFTER SHOT", "UnequipAfterShot")
+    addSlider("MIN DELAY (ms)", "UnequipDelayMin", 0, 2000, 0)
+    addSlider("MAX DELAY (ms)", "UnequipDelayMax", 0, 3000, 0)
+
+    addSection("Actions")
+    addBtn("🔫 CHECK MUZZLE", function()
+        local eq = forceEquipGun()
+        if not eq then notify("Cannot equip gun", 3) return end
+        local pos, source = getMuzzlePosition(nil)
+        if pos then
+            print(string.format("[CORE] MUZZLE: (%.1f,%.1f,%.1f) from=%s", pos.X, pos.Y, pos.Z, source))
+            notify("Muzzle: " .. source, 3)
+        else notify("No muzzle", 3) end
+    end)
+    addBtn("🎯 TEST FIRE", function() testFire() notify("Test (see F9)", 2) end)
+    addBtn("🎯 FLICK NOW", function() task.spawn(flickToMurderer) end)
+
+    addSection("Config")
+    addBtn("💾 SAVE CONFIG", function()
+        if saveConfig() then notify("Saved", 2) else notify("Failed", 2) end
+    end)
+    addBtn("📋 COPY CONFIG", function()
+        local ok, json = pcall(function() return HttpService:JSONEncode(Config) end)
+        if ok and json and setclipboard then
+            pcall(function() setclipboard(json) end)
+            notify("Copied", 2)
+        end
+    end)
+    addBtn("📥 LOAD CONFIG", function()
+        if not getclipboard then return end
+        local ok, clip = pcall(function() return getclipboard() end)
+        if not ok or not clip or #clip < 10 then notify("Empty", 2) return end
+        local ok2, data = pcall(function() return HttpService:JSONDecode(clip) end)
+        if not ok2 or type(data) ~= "table" then notify("Invalid JSON", 2) return end
+        for k, v in pairs(data) do if Config[k] ~= nil then Config[k] = v end end
+        saveConfig()
+        notify("Loaded. Restarting...", 2)
+        task.wait(1)
+        if getgenv().FlickCleanup then pcall(getgenv().FlickCleanup) end
+    end)
+
+    bindBtnRef = addBtn("⌨️ BIND: " .. Config.Keybind, function()
+        waitingForBind = true
+        bindBtnRef.Text = "⌨️ PRESS ANY KEY..."
+        task.wait(3)
+        if waitingForBind then
+            waitingForBind = false
+            bindBtnRef.Text = "⌨️ BIND: " .. Config.Keybind
+        end
+    end)
+
+    addBtn("💀 UNLOAD", function() task.wait(0.3); fullUnload() end)
+
+    -- ═════════ КНОПКА ОТКРЫТИЯ ═════════
+    local openBtn = Instance.new("TextButton")
+    openBtn.Name = "OpenButton"
+    openBtn.Size = UDim2.fromOffset(48, 48)
+    openBtn.Position = UDim2.new(0.85, 0, 0.85, 0)
+    openBtn.BackgroundColor3 = C.bg2
+    openBtn.AutoButtonColor = false
+    openBtn.Text = ""
+    openBtn.BorderSizePixel = 0
+    openBtn.Visible = true
+    openBtn.ZIndex = 10
+    openBtn.Parent = gui
+    addCorner(openBtn, UDim.new(1, 0))
+    addStroke(openBtn)
+
+    if CustomIcon ~= nil and CustomIcon ~= "" then
+        local icon = Instance.new("ImageLabel")
+        icon.Size = UDim2.new(1, -6, 1, -6)
+        icon.Position = UDim2.fromOffset(3, 3)
+        icon.BackgroundTransparency = 1
+        icon.Image = CustomIcon
+        icon.ScaleType = Enum.ScaleType.Crop
+        icon.ZIndex = 11
+        icon.Parent = openBtn
+        addCorner(icon, UDim.new(1, 0))
+    else
+        local fallback = newLabel(openBtn, "⚡", FONT_B, 20, C.text, Enum.TextXAlignment.Center)
+        fallback.Size = UDim2.fromScale(1, 1)
+        fallback.ZIndex = 11
+    end
+
+    openBtn.MouseEnter:Connect(function() tween(openBtn, {BackgroundColor3 = C.hover}) end)
+    openBtn.MouseLeave:Connect(function() tween(openBtn, {BackgroundColor3 = C.bg2}) end)
+
+    local wasMoved = DragSystem(openBtn, openBtn)
+
+    local function setMenu(state)
+        main.Visible = state
+        openBtn.Visible = not state
+    end
+
+    closeBtn.MouseButton1Click:Connect(function() setMenu(false) end)
+    openBtn.MouseButton1Click:Connect(function()
+        if not wasMoved() then setMenu(true) end_!
